@@ -1,0 +1,129 @@
+services:
+  # Ollama service for local LLM
+  ollama:
+    image: ollama/ollama:latest
+    container_name: moya-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ${OLLAMA_MODELS_DIR:-~/.ollama}:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - moya-network
+    deploy:
+      resources:
+        reservations:
+          memory: 6G
+
+  # Ollama model initialization - pulls gemma3:1b if not present
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: moya-ollama-init
+    depends_on:
+      - ollama
+    volumes:
+      - ${OLLAMA_MODELS_DIR:-~/.ollama}:/root/.ollama
+    networks:
+      - moya-network
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "echo 'Checking for gemma3:1b model...' &&
+      if ! ollama list | grep -q 'gemma3:1b'; then
+        echo 'Pulling gemma3:1b model...' &&
+        ollama pull gemma3:1b &&
+        echo 'Model pulled successfully'
+      else
+        echo 'Model already exists, skipping pull'
+      fi"
+
+  # Production: MOYA Research analyze command
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    image: moya-research:latest
+    container_name: moya-research-app
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:1b}
+      DEBUG: ${DEBUG:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.0}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-4000}
+    volumes:
+      - ./papers:/app/papers:ro
+      - ./data:/app/data
+      - ./database:/app/database
+      - ./logs:/app/logs
+    networks:
+      - moya-network
+    restart: "no"
+    command: analyze --papers-dir /app/papers --output-dir /app/data --db-dir /app/database
+    profiles:
+      - prod
+
+  # Development: with source code mounted
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    image: moya-research:dev
+    container_name: moya-research-dev
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:1b}
+      DEBUG: ${DEBUG:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+      PYTHONPATH: /app/src
+    volumes:
+      - ./src:/app/src:rw
+      - ./papers:/app/papers:ro
+      - ./data:/app/data
+      - ./database:/app/database
+      - ./logs:/app/logs
+    networks:
+      - moya-network
+    restart: "no"
+    command: analyze --papers-dir /app/papers --output-dir /app/data --db-dir /app/database
+    profiles:
+      - dev
+
+  # Interactive chat service
+  chat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    image: moya-research:latest
+    container_name: moya-research-chat
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:1b}
+      DEBUG: ${DEBUG:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./database:/app/database
+      - ./logs:/app/logs
+    networks:
+      - moya-network
+    stdin_open: true
+    tty: true
+    command: chat --db-dir /app/database
+    profiles:
+      - chat
+
+networks:
+  moya-network:
+    driver: bridge
+    name: moya-network
